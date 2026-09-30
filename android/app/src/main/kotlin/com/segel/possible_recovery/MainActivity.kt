@@ -54,9 +54,57 @@ class MainActivity : FlutterActivity() {
     private var isBurstActive = false
     private val burstTags = mutableMapOf<String, Double>()
 
-    private var lastBarcodeData = ""
-    private var lastBarcodeTime = 0L
+    private var isScanKeyPressed = false
+    private var lastDeliveredBarcode = ""
+    private var lastDeliveredAt = 0L
     private var simulatedTagEpc: String? = null
+    private val loggedEpcTags = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
+
+    private fun normalizeEpc(epc: String, pcWords: Int? = null): String {
+        val clean = epc.replace(" ", "").trim().uppercase()
+        if (clean.isEmpty()) return ""
+
+        if (pcWords != null && pcWords > 0) {
+            val targetLen = pcWords * 4
+            if (clean.length > targetLen) {
+                return clean.substring(0, targetLen)
+            }
+            return clean
+        }
+
+        // Respaldo cuando no hay PC utilizable: si epc tiene 32 hex, empieza con '30' y termina en '00000000' -> recortar a 24
+        if (clean.length == 32 && clean.startsWith("30") && clean.endsWith("00000000")) {
+            return clean.substring(0, 24)
+        }
+
+        return clean
+    }
+
+    private fun normalizeEpcWithTag(tagInfo: UHFTAGInfo): String {
+        val epcRaw = (tagInfo.epc ?: "").replace(" ", "").trim().uppercase()
+        val pcStr = try { tagInfo.pc?.replace(" ", "")?.trim() } catch (e: Throwable) { null }
+
+        var words = 0
+        if (!pcStr.isNullOrEmpty()) {
+            try {
+                val pcVal = pcStr.toInt(16)
+                if (pcVal != 0) {
+                    words = (pcVal shr 11) and 0x1F
+                }
+            } catch (e: Exception) {
+                words = 0
+            }
+        }
+        val epcHexLen = words * 4
+
+        val epcFinal = normalizeEpc(epcRaw, if (words > 0) words else null)
+
+        if (epcRaw.isNotEmpty() && loggedEpcTags.add(epcRaw)) {
+            Log.i("RFID_DEBUG", "Tag normalize: epcRaw=$epcRaw, pc=$pcStr, epcHexLen=$epcHexLen, epcFinal=$epcFinal")
+        }
+
+        return epcFinal
+    }
 
     private val scannerReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
@@ -65,8 +113,9 @@ class MainActivity : FlutterActivity() {
             Log.i("BARCODE_DEBUG", "scannerReceiver.onReceive action=$action")
             if (action == "com.segel.possible_recovery.SIMULATE_TAG") {
                 val epc = intent.getStringExtra("epc") ?: "309373E167B0610BDCE43394"
-                Log.i("RFID_DEBUG", "SIMULATE_TAG received: epc=$epc")
-                simulatedTagEpc = epc
+                val normalizedEpc = normalizeEpc(epc)
+                Log.i("RFID_DEBUG", "SIMULATE_TAG received: epc=$epc, normalized=$normalizedEpc")
+                simulatedTagEpc = normalizedEpc
                 runOnUiThread {
                     channel.invokeMethod("onTriggerPressed", null)
                     channel.invokeMethod("trigger", null)
@@ -87,7 +136,13 @@ class MainActivity : FlutterActivity() {
 
             Log.i("BARCODE_DEBUG", "scannerReceiver extracted barcode: '$barcode'")
             if (!barcode.isNullOrEmpty()) {
-                onBarcodeReceived(barcode, "BroadcastReceiver($action)")
+                val trimmed = barcode.trim()
+                val lower = trimmed.lowercase()
+                if (lower == "cancel" || lower == "failuer" || lower == "failure" || lower == "timeout") {
+                    Log.i("BARCODE_DEBUG", "scannerReceiver ignoring scanner status: '$barcode'")
+                    return
+                }
+                onBarcodeReceived(trimmed, "BroadcastReceiver($action)")
             }
         }
     }
@@ -131,23 +186,36 @@ class MainActivity : FlutterActivity() {
     }
 
     private fun onBarcodeReceived(data: String, source: String) {
-        mainHandler.removeCallbacks(barcodeFallbackRunnable)
-        isBarcodeScanActive = false
-        val now = System.currentTimeMillis()
-        if (data == lastBarcodeData && now - lastBarcodeTime < 1500) {
-            Log.i("BARCODE_DEBUG", "Ignoring duplicate barcode from $source: $data (< 1500ms)")
+        val trimmed = data.trim()
+        if (trimmed.isEmpty()) return
+
+        val lower = trimmed.lowercase()
+        if (lower == "cancel" || lower == "failuer" || lower == "failure" || lower == "timeout") {
+            Log.i("BARCODE_DEBUG", "onBarcodeReceived ignoring scanner status from $source: '$trimmed'")
             return
         }
-        lastBarcodeData = data
-        lastBarcodeTime = now
-        Log.i("BARCODE_DEBUG", "Delivering barcode from $source to Flutter: $data")
+
+        val now = System.currentTimeMillis()
+        if (trimmed == lastDeliveredBarcode && (now - lastDeliveredAt) < 1500L) {
+            Log.i("BARCODE_DEBUG", "Ignoring duplicate barcode from $source: $trimmed (< 1500ms since last delivery)")
+            // Repeated discards do NOT update lastDeliveredAt!
+            return
+        }
+
+        // Successfully receiving a valid barcode cancels fallback runnable and active flag
+        mainHandler.removeCallbacks(barcodeFallbackRunnable)
+        isBarcodeScanActive = false
+
+        lastDeliveredBarcode = trimmed
+        lastDeliveredAt = now
+        Log.i("BARCODE_DEBUG", "Delivering barcode from $source to Flutter: $trimmed")
         try {
             toneGenerator?.startTone(ToneGenerator.TONE_PROP_BEEP, 40)
         } catch (e: Exception) {
             // ignore audio error
         }
         runOnUiThread {
-            channel.invokeMethod("barcode", data)
+            channel.invokeMethod("barcode", trimmed)
         }
     }
 
@@ -256,9 +324,16 @@ class MainActivity : FlutterActivity() {
         val isSideKey = (keyCode == 139 || keyCode == 291 || keyCode == 292 || keyCode == 294)
         val isScanKey = isTriggerKey || isSideKey
 
-        Log.d("C72_KEY", "onKeyDown keyCode=$keyCode (isTrigger=$isTriggerKey, isSide=$isSideKey), mode=$currentKeyMode, burstActive=$isBurstActive, barcodeActive=$isBarcodeScanActive")
+        Log.d("C72_KEY", "onKeyDown keyCode=$keyCode (isTrigger=$isTriggerKey, isSide=$isSideKey), mode=$currentKeyMode, burstActive=$isBurstActive, barcodeActive=$isBarcodeScanActive, repeat=${event?.repeatCount}")
 
         if (isScanKey) {
+            val repeat = event?.repeatCount ?: 0
+            if (repeat > 0 || isScanKeyPressed) {
+                Log.d("C72_KEY", "Ignoring repeat onKeyDown keyCode=$keyCode (repeat=$repeat, isScanKeyPressed=$isScanKeyPressed)")
+                return true
+            }
+            isScanKeyPressed = true
+
             when (currentKeyMode) {
                 "rfid" -> {
                     if (isTriggerKey) {
@@ -280,8 +355,10 @@ class MainActivity : FlutterActivity() {
                         Log.i("C72_KEY", "Ignoring scan key $keyCode because RFID burst is active")
                         return true
                     }
-                    Log.i("BARCODE_DEBUG", "Scan key $keyCode pressed in barcode mode, triggering 2D scan")
-                    triggerBarcodeScan()
+                    Log.i("BARCODE_DEBUG", "Scan key $keyCode pressed in barcode mode: listening for system scanner broadcast (no BARCODESTARTSCAN sent)")
+                    isBarcodeScanActive = true
+                    mainHandler.removeCallbacks(barcodeFallbackRunnable)
+                    mainHandler.postDelayed(barcodeFallbackRunnable, 3000)
                     return true
                 }
                 "none" -> {
@@ -297,6 +374,20 @@ class MainActivity : FlutterActivity() {
 
         channel.invokeMethod("onKeyDown", mapOf("keyCode" to keyCode))
         return super.onKeyDown(keyCode, event)
+    }
+
+    override fun onKeyUp(keyCode: Int, event: KeyEvent?): Boolean {
+        val isTriggerKey = (keyCode == 293)
+        val isSideKey = (keyCode == 139 || keyCode == 291 || keyCode == 292 || keyCode == 294)
+        val isScanKey = isTriggerKey || isSideKey
+
+        if (isScanKey) {
+            Log.d("C72_KEY", "onKeyUp keyCode=$keyCode, releasing isScanKeyPressed")
+            isScanKeyPressed = false
+            return true
+        }
+
+        return super.onKeyUp(keyCode, event)
     }
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
@@ -352,7 +443,8 @@ class MainActivity : FlutterActivity() {
                                 uhf?.setInventoryCallback(object : IUHFInventoryCallback {
                                     override fun callback(tagInfo: UHFTAGInfo?) {
                                         if (tagInfo?.epc != null) {
-                                            val epcRead = tagInfo.epc.replace(" ", "").uppercase()
+                                            val epcRead = normalizeEpcWithTag(tagInfo)
+                                            if (epcRead.isEmpty()) return
                                             val rssiRaw = tagInfo.rssi?.replace(Regex("[^0-9-]"), "") ?: "-100"
                                             var rssiValue = rssiRaw.toDoubleOrNull() ?: -100.0
                                             if (rssiValue < -500 || rssiValue > 500) {
@@ -411,6 +503,8 @@ class MainActivity : FlutterActivity() {
                 }
 
                 "openScanner" -> {
+                    lastDeliveredBarcode = ""
+                    lastDeliveredAt = 0L
                     currentKeyMode = "barcode"
                     registerScannerReceiver()
                     try {
@@ -430,6 +524,12 @@ class MainActivity : FlutterActivity() {
                     result.success(true)
                 }
 
+                "resetBarcodeDedupe" -> {
+                    lastDeliveredBarcode = ""
+                    lastDeliveredAt = 0L
+                    result.success(true)
+                }
+
                 "startScan" -> {
                     Log.i("BARCODE_DEBUG", "MethodChannel startScan called")
                     val started = triggerBarcodeScan()
@@ -444,6 +544,8 @@ class MainActivity : FlutterActivity() {
 
                 "closeScanner" -> {
                     Log.i("BARCODE_DEBUG", "MethodChannel closeScanner called")
+                    lastDeliveredBarcode = ""
+                    lastDeliveredAt = 0L
                     stopBarcodeScan()
                     closeBarcodeDecoder()
                     result.success(true)
@@ -502,22 +604,24 @@ class MainActivity : FlutterActivity() {
                                 }
                                 val tag = uhf?.readTagFromBuffer()
                                 if (tag != null && !tag.epc.isNullOrEmpty()) {
-                                    val epcRead = tag.epc.replace(" ", "").uppercase()
-                                    val rssiRaw = tag.rssi?.replace(Regex("[^0-9-]"), "") ?: "-100"
-                                    var rssiValue = rssiRaw.toDoubleOrNull() ?: -100.0
-                                    if (rssiValue < -500 || rssiValue > 500) {
-                                        rssiValue /= 100.0
-                                    }
-                                    synchronized(burstLock) {
-                                        val curr = burstTags[epcRead]
-                                        if (curr == null || rssiValue > curr) {
-                                            burstTags[epcRead] = rssiValue
+                                    val epcRead = normalizeEpcWithTag(tag)
+                                    if (epcRead.isNotEmpty()) {
+                                        val rssiRaw = tag.rssi?.replace(Regex("[^0-9-]"), "") ?: "-100"
+                                        var rssiValue = rssiRaw.toDoubleOrNull() ?: -100.0
+                                        if (rssiValue < -500 || rssiValue > 500) {
+                                            rssiValue /= 100.0
                                         }
-                                    }
-                                    try {
-                                        toneGenerator?.startTone(ToneGenerator.TONE_PROP_BEEP, 40)
-                                    } catch (e: Exception) {
-                                        // ignore audio error
+                                        synchronized(burstLock) {
+                                            val curr = burstTags[epcRead]
+                                            if (curr == null || rssiValue > curr) {
+                                                burstTags[epcRead] = rssiValue
+                                            }
+                                        }
+                                        try {
+                                            toneGenerator?.startTone(ToneGenerator.TONE_PROP_BEEP, 40)
+                                        } catch (e: Exception) {
+                                            // ignore audio error
+                                        }
                                     }
                                 } else {
                                     Thread.sleep(15)
@@ -574,6 +678,7 @@ class MainActivity : FlutterActivity() {
 
     override fun onResume() {
         super.onResume()
+        isScanKeyPressed = false
         registerScannerReceiver()
         try {
             sendBroadcast(Intent("com.rscja.scanner.action.BARCODELOCKSCANKEY"))
@@ -584,6 +689,7 @@ class MainActivity : FlutterActivity() {
     }
 
     override fun onPause() {
+        isScanKeyPressed = false
         try {
             sendBroadcast(Intent("com.rscja.scanner.action.BARCODEUNLOCKSCANKEY"))
             Log.i("C72_KEY", "onPause: broadcasted BARCODEUNLOCKSCANKEY")

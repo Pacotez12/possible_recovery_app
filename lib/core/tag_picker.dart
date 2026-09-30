@@ -1,8 +1,10 @@
+import 'epc_normalizer.dart';
+
 class TagRead {
   final String epc;
   final double rssi;
 
-  TagRead(this.epc, this.rssi);
+  TagRead(String epc, this.rssi) : epc = normalizeEpc(epc);
 }
 
 sealed class PickResult {}
@@ -10,7 +12,7 @@ sealed class PickResult {}
 class Picked extends PickResult {
   final String epc;
 
-  Picked(this.epc);
+  Picked(String epc) : epc = normalizeEpc(epc);
 }
 
 class NoTag extends PickResult {}
@@ -23,5 +25,5 @@ PickResult pickTag(List<TagRead> reads, {double marginDb = 3}) {
   if (sorted.length > 1 && (sorted[0].rssi - sorted[1].rssi) < marginDb) {
     return Ambiguous();
   }
-  return Picked(sorted[0].epc.toUpperCase());
+  return Picked(normalizeEpc(sorted[0].epc));
 }

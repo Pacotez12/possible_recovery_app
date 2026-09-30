@@ -27,13 +27,35 @@ android {
         // flag during build.
         versionCode = flutter.versionCode
         versionName = flutter.versionName
+
+        ndk {
+            abiFilters.add("arm64-v8a")
+        }
     }
 
     buildTypes {
         release {
+            isMinifyEnabled = true
+            isShrinkResources = true
+            proguardFiles(
+                getDefaultProguardFile("proguard-android-optimize.txt"),
+                "proguard-rules.pro"
+            )
             // TODO: Add your own signing config for the release build.
             // Signing with the debug keys for now, so `flutter run --release` works.
             signingConfig = signingConfigs.getByName("debug")
+        }
+    }
+
+    packaging {
+        jniLibs {
+            useLegacyPackaging = true
+            excludes += listOf(
+                "lib/armeabi/**",
+                "lib/armeabi-v7a/**",
+                "lib/x86/**",
+                "lib/x86_64/**"
+            )
         }
     }
 }

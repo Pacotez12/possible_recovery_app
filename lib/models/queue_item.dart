@@ -106,6 +106,8 @@ class QueueItem {
 
   QueueItem copyWith({
     String? clientUuid,
+    String? epc,
+    String? sku,
     String? status,
     String? result,
     String? message,
@@ -120,8 +122,8 @@ class QueueItem {
   }) {
     return QueueItem(
       clientUuid: clientUuid ?? this.clientUuid,
-      epc: epc,
-      sku: sku,
+      epc: epc ?? this.epc,
+      sku: sku ?? this.sku,
       description: description ?? this.description,
       previousSku: previousSku ?? this.previousSku,
       previousDescription: previousDescription ?? this.previousDescription,

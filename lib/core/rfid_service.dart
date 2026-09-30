@@ -1,6 +1,8 @@
 import 'dart:async';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
+import 'barcode_deduper.dart';
+import 'epc_normalizer.dart';
 import 'tag_picker.dart';
 
 class RfidService {
@@ -22,17 +24,16 @@ class RfidService {
   bool _isInitialized = false;
   bool get isInitialized => _isInitialized;
 
-  String _lastBarcode = '';
-  DateTime _lastBarcodeTime = DateTime.fromMillisecondsSinceEpoch(0);
+  final BarcodeDeduper _barcodeDeduper;
 
-  RfidService() {
+  RfidService({BarcodeDeduper? barcodeDeduper})
+      : _barcodeDeduper = barcodeDeduper ?? BarcodeDeduper() {
     _channel.setMethodCallHandler(_handleNativeCall);
   }
 
-  @visibleForTesting
   void resetBarcodeDedupe() {
-    _lastBarcode = '';
-    _lastBarcodeTime = DateTime.fromMillisecondsSinceEpoch(0);
+    _barcodeDeduper.reset();
+    _channel.invokeMethod<bool>('resetBarcodeDedupe').catchError((_) => false);
   }
 
   @visibleForTesting
@@ -47,7 +48,8 @@ class RfidService {
       case 'onTagRead':
         if (call.arguments is Map) {
           final map = Map<String, dynamic>.from(call.arguments as Map);
-          final epc = map['epc']?.toString() ?? '';
+          final rawEpc = map['epc']?.toString() ?? '';
+          final epc = normalizeEpc(rawEpc);
           final rssi = (map['rssi'] is num)
               ? (map['rssi'] as num).toDouble()
               : double.tryParse(map['rssi']?.toString() ?? '') ?? -100.0;
@@ -59,17 +61,18 @@ class RfidService {
       case 'onBarcodeRead':
       case 'barcode':
         final code = call.arguments?.toString() ?? '';
-        if (code.isNotEmpty) {
-          final now = DateTime.now();
-          if (code == _lastBarcode &&
-              now.difference(_lastBarcodeTime) <
-                  const Duration(milliseconds: 1500)) {
-            debugPrint('RfidService: ignorando barcode duplicado "$code" (< 1.5s)');
-            break;
+        final trimmed = code.trim();
+        final lower = trimmed.toLowerCase();
+        if (lower == 'cancel' || lower == 'failuer' || lower == 'failure' || lower == 'timeout') {
+          debugPrint('RfidService: ignorando estado del escáner "$code"');
+          break;
+        }
+        if (trimmed.isNotEmpty) {
+          if (_barcodeDeduper.shouldDeliver(trimmed)) {
+            _barcodeController.add(trimmed);
+          } else {
+            debugPrint('RfidService: ignorando barcode duplicado "$trimmed" (< 1.5s)');
           }
-          _lastBarcode = code;
-          _lastBarcodeTime = now;
-          _barcodeController.add(code);
         }
         break;
       case 'onKeyDown':
@@ -136,7 +139,7 @@ class RfidService {
       for (final item in res) {
         if (item is Map) {
           final map = Map<String, dynamic>.from(item);
-          final epc = map['epc']?.toString() ?? '';
+          final epc = normalizeEpc(map['epc']?.toString() ?? '');
           final rssi = (map['rssi'] is num)
               ? (map['rssi'] as num).toDouble()
               : double.tryParse(map['rssi']?.toString() ?? '') ?? -100.0;

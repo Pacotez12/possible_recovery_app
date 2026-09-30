@@ -5,6 +5,7 @@ import 'package:provider/provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:uuid/uuid.dart';
 import '../../core/app_error.dart';
+import '../../core/epc_normalizer.dart';
 import '../../core/rfid_service.dart';
 import '../../core/sku_parser.dart';
 import '../../core/tag_picker.dart';
@@ -141,6 +142,7 @@ class _ScanScreenState extends State<ScanScreen> with WidgetsBindingObserver {
   }
 
   Future<void> _open2dScanner() async {
+    _rfidService.resetBarcodeDedupe();
     final ok = await _rfidService.openScanner();
     if (!mounted) return;
     setState(() {
@@ -170,12 +172,6 @@ class _ScanScreenState extends State<ScanScreen> with WidgetsBindingObserver {
     if (!started) {
       setState(() {
         _isScanningBarcode = false;
-        _currentError = const AppError(
-          kind: AppErrorKind.hardware,
-          title: 'Lector de códigos',
-          message: 'El lector de códigos no respondió',
-          canRetry: true,
-        );
       });
       return;
     }
@@ -185,12 +181,6 @@ class _ScanScreenState extends State<ScanScreen> with WidgetsBindingObserver {
       _rfidService.stopScan();
       setState(() {
         _isScanningBarcode = false;
-        _currentError = const AppError(
-          kind: AppErrorKind.hardware,
-          title: 'Lector de códigos',
-          message: 'El lector de códigos no respondió',
-          canRetry: true,
-        );
       });
     });
   }
@@ -202,8 +192,19 @@ class _ScanScreenState extends State<ScanScreen> with WidgetsBindingObserver {
         _isScanningBarcode = false;
       });
     }
+
+    final lower = raw.trim().toLowerCase();
+    if (lower == 'cancel' || lower == 'failuer' || lower == 'failure' || lower == 'timeout') {
+      debugPrint('ScanScreen: ignorando estado no barcode del lector: $raw');
+      return;
+    }
+
     final parsed = parseSku(raw);
     if (parsed != null) {
+      setState(() {
+        _currentError = null;
+        _scannerInitFailed = false;
+      });
       _onSkuSubmitted(parsed);
     } else {
       FeedbackHelper.onError();
@@ -247,6 +248,7 @@ class _ScanScreenState extends State<ScanScreen> with WidgetsBindingObserver {
   Future<void> _startReading() async {
     if (_state == ScanState.reading || _state == ScanState.sending) return;
 
+    _rfidService.resetBarcodeDedupe();
     _setScanState(ScanState.reading);
     setState(() {
       _currentError = null;
@@ -293,20 +295,22 @@ class _ScanScreenState extends State<ScanScreen> with WidgetsBindingObserver {
         break;
 
       case Picked(:final epc):
+        final normEpc = normalizeEpc(epc);
         await FeedbackHelper.onTagDetected();
         _setScanState(ScanState.epcShown);
         setState(() {
-          _currentEpc = epc;
+          _currentEpc = normEpc;
         });
-        await _performLookup(epc);
+        await _performLookup(normEpc);
         break;
     }
   }
 
   Future<void> _performLookup(String epc) async {
+    final normEpc = normalizeEpc(epc);
     final apiClient = context.read<ApiClient>();
     try {
-      final res = await apiClient.lookup(epc);
+      final res = await apiClient.lookup(normEpc);
       if (!mounted) return;
       if (res.isAssigned && res.sku != null && res.sku!.isNotEmpty) {
         FeedbackHelper.onWarning();
@@ -577,6 +581,7 @@ class _ScanScreenState extends State<ScanScreen> with WidgetsBindingObserver {
     });
 
     final targetSku = skuOverride ?? _currentSku;
+    final targetEpc = normalizeEpc(_currentEpc);
     final origSku = previousSku ?? _reassignOriginalSku ?? _lookupResult?.sku;
     final origDesc = previousDesc ?? _reassignOriginalDesc ?? _lookupResult?.description;
     final reassignFlag = reassign ?? (_isReassigning && targetSku != _reassignOriginalSku);
@@ -591,7 +596,7 @@ class _ScanScreenState extends State<ScanScreen> with WidgetsBindingObserver {
 
     // 1. Insert ALWAYS before calling API
     await queueService.recordPending(
-      epc: _currentEpc,
+      epc: targetEpc,
       sku: targetSku,
       clientUuid: clientUuid,
       description: desc,
@@ -603,7 +608,7 @@ class _ScanScreenState extends State<ScanScreen> with WidgetsBindingObserver {
 
     try {
       final assignResult = await apiClient.assign(
-        _currentEpc,
+        targetEpc,
         targetSku,
         clientUuid,
         deviceId,
@@ -691,6 +696,7 @@ class _ScanScreenState extends State<ScanScreen> with WidgetsBindingObserver {
     _debounceTimer?.cancel();
     _barcodeTimeoutTimer?.cancel();
     _isScanningBarcode = false;
+    _rfidService.resetBarcodeDedupe();
     _rfidService.stopScan();
     _rfidService.closeScanner();
     if (_isConfirmSheetOpen) {

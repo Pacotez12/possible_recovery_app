@@ -2,6 +2,7 @@ import 'dart:async';
 import 'package:connectivity_plus/connectivity_plus.dart';
 import 'package:flutter/foundation.dart';
 import '../core/app_error.dart';
+import '../core/epc_normalizer.dart';
 import '../models/queue_item.dart';
 import 'api_client.dart';
 import 'local_db.dart';
@@ -94,9 +95,10 @@ class QueueService extends ChangeNotifier {
     String? previousSku,
     String? previousDescription,
   }) async {
+    final normEpc = normalizeEpc(epc);
     final item = QueueItem(
       clientUuid: clientUuid,
-      epc: epc.toUpperCase().trim(),
+      epc: normEpc,
       sku: sku.toUpperCase().trim(),
       description: description,
       previousSku: previousSku,
@@ -231,8 +233,11 @@ class QueueService extends ChangeNotifier {
         '${now.year}-${now.month.toString().padLeft(2, '0')}-${now.day.toString().padLeft(2, '0')}';
     try {
       final serverItems = await apiClient.getHistory(since: todayStr);
+      final normalizedItems = serverItems
+          .map((item) => item.copyWith(epc: normalizeEpc(item.epc)))
+          .toList();
       _isUsingLocalFallback = false;
-      await localDb.upsertServerItems(serverItems);
+      await localDb.upsertServerItems(normalizedItems);
       await refreshCounts();
       return true;
     } catch (e) {

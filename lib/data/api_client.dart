@@ -1,6 +1,7 @@
 import 'package:dio/dio.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import '../core/app_error.dart';
+import '../core/epc_normalizer.dart';
 import '../models/assign_result.dart';
 import '../models/catalog_product.dart';
 import '../models/lookup_result.dart';
@@ -148,7 +149,7 @@ class ApiClient {
     try {
       final response = await dio.post(
         'recovery/lookup',
-        data: {'epc': epc.toUpperCase().trim()},
+        data: {'epc': normalizeEpc(epc)},
       );
 
       if (response.statusCode == 401 || response.statusCode == 403) {
@@ -188,7 +189,7 @@ class ApiClient {
     await updateBaseUrl();
     try {
       final payload = <String, dynamic>{
-        'epc': epc.toUpperCase().trim(),
+        'epc': normalizeEpc(epc),
         'sku': sku.toUpperCase().trim(),
         'client_uuid': clientUuid,
         'device_id': deviceId,

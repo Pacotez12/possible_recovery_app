@@ -79,6 +79,67 @@ void main() {
       expect(emitted, ['AF-012917']);
       await sub.cancel();
     });
+
+    test('ignores scanner status results like cancel and failuer', () async {
+      final emitted = <String>[];
+      final sub = rfidService.onBarcodeRead.listen(emitted.add);
+
+      await rfidService.handleNativeCallForTest(
+        const MethodCall('barcode', 'cancel'),
+      );
+      await rfidService.handleNativeCallForTest(
+        const MethodCall('barcode', 'failuer'),
+      );
+      await rfidService.handleNativeCallForTest(
+        const MethodCall('barcode', 'failure'),
+      );
+      await rfidService.handleNativeCallForTest(
+        const MethodCall('barcode', 'timeout'),
+      );
+
+      expect(emitted, isEmpty);
+
+      // A real barcode afterwards is delivered normally
+      await rfidService.handleNativeCallForTest(
+        const MethodCall('barcode', 'AF-012918'),
+      );
+      expect(emitted, ['AF-012918']);
+
+      await sub.cancel();
+    });
+
+    test('repeated discards do not extend the 1500ms window', () async {
+      final emitted = <String>[];
+      final sub = rfidService.onBarcodeRead.listen(emitted.add);
+
+      await rfidService.handleNativeCallForTest(
+        const MethodCall('barcode', 'AF-012918'),
+      );
+      expect(emitted, ['AF-012918']);
+
+      // Discard at 500ms
+      await Future.delayed(const Duration(milliseconds: 500));
+      await rfidService.handleNativeCallForTest(
+        const MethodCall('barcode', 'AF-012918'),
+      );
+      expect(emitted, ['AF-012918']);
+
+      // Discard at 1000ms (500ms after last discard)
+      await Future.delayed(const Duration(milliseconds: 500));
+      await rfidService.handleNativeCallForTest(
+        const MethodCall('barcode', 'AF-012918'),
+      );
+      expect(emitted, ['AF-012918']);
+
+      // Wait 600ms (total 1600ms from initial delivery, but only 600ms from last discard)
+      await Future.delayed(const Duration(milliseconds: 600));
+      await rfidService.handleNativeCallForTest(
+        const MethodCall('barcode', 'AF-012918'),
+      );
+      expect(emitted, ['AF-012918', 'AF-012918']);
+
+      await sub.cancel();
+    });
   });
 
   group('ConfirmSheet in-place update and no duplicate routes', () {

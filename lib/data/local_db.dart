@@ -1,5 +1,6 @@
 import 'package:path/path.dart' as p;
 import 'package:sqflite/sqflite.dart';
+import '../core/epc_normalizer.dart';
 import '../core/sku_ranking.dart';
 import '../core/text_normalizer.dart';
 import '../models/catalog_product.dart';
@@ -30,12 +31,14 @@ class LocalDb {
       final dbPath = await getDatabasesPath();
       path = p.join(dbPath, dbName);
     }
-    return await openDatabase(
+    final db = await openDatabase(
       path,
       version: dbVersion,
       onCreate: _onCreate,
       onUpgrade: _onUpgrade,
     );
+    await migrateNormalizedEpcs(db);
+    return db;
   }
 
   Future<void> _onCreate(Database db, int version) async {
@@ -414,6 +417,39 @@ class LocalDb {
   Future<void> clearQueue() async {
     final db = await database;
     await db.delete('queue');
+  }
+
+  /// Migrates existing queue items in local database by normalizing EPC strings
+  /// (e.g. 32-char EPCs with trailing zeros truncated to 24 hex characters).
+  Future<int> migrateNormalizedEpcs([Database? targetDb]) async {
+    final db = targetDb ?? await database;
+    try {
+      final rows = await db.query('queue', columns: ['client_uuid', 'epc']);
+      if (rows.isEmpty) return 0;
+      final batch = db.batch();
+      var count = 0;
+      for (final row in rows) {
+        final clientUuid = row['client_uuid']?.toString() ?? '';
+        final epc = row['epc']?.toString() ?? '';
+        if (clientUuid.isEmpty || epc.isEmpty) continue;
+        final norm = normalizeEpc(epc);
+        if (norm != epc) {
+          batch.update(
+            'queue',
+            {'epc': norm},
+            where: 'client_uuid = ?',
+            whereArgs: [clientUuid],
+          );
+          count++;
+        }
+      }
+      if (count > 0) {
+        await batch.commit(noResult: true);
+      }
+      return count;
+    } catch (_) {
+      return 0;
+    }
   }
 
   Future<void> close() async {
